@@ -111,7 +111,26 @@ function run() {
     
     let metrics = {name}
     //prepare run
-    let all_run_raw = font.layout(str_src)
+    let all_run_raw = font.layout(str_src, {
+        rvrn: false,
+        ltra: false,
+        ltrm: false,
+        frac: false,
+        numr: false,
+        dnom: false,
+        ccmp: false,
+        locl: false,
+        rlig: false,
+        mark: false,
+        mkmk: false,
+        calt: false,
+        clig: false,
+        liga: false,
+        rclt: false,
+        curs: false,
+        kern: false
+
+    })
     for (let i = 0; i < all_run_raw.positions.length; i++) {
         const all_position = all_run_raw.positions[i];
         for (let key in all_position) {
@@ -125,6 +144,7 @@ function run() {
     //take whole string width regardles of lines
     metrics["text"] = str_src
     metrics["total_width"] = all_run_raw.advanceWidth * _scale
+    metrics["line_gap"] = lineGap
     
     //as lines and words
     let nl = font.glyphForCodePoint('\n'.charCodeAt(0))
@@ -152,8 +172,12 @@ function run() {
             word.widths.push(position.advanceWidth * _scale)
             word.text += code_points_to_char(glyph.codePoints)
         }
-
     }
+    
+    lines.push(line);
+    words.push(word)
+
+    
     metrics["lines"] = representation_to_metrics(lines)
     metrics["words"] = representation_to_metrics(words)
    

@@ -1,28 +1,27 @@
-use std::path::Path;
+use std::ops::Deref;
+use std::{path::Path, fmt::Error};
 use std::collections::HashMap;
 use std::fs;
 
-use owned_ttf_parser::{OwnedFace, Face, AsFaceRef, kern};
+use owned_ttf_parser::{OwnedFace, Face, AsFaceRef, kern::{self, Subtable}};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GlyphMetrics {
-   id: u16,
-   character: char,
-   width: u32,
-   height: u32
+   pub id: u16,
+   pub character: char,
+   pub width: f32,
+   pub height: f32,
+   pub kern_right: f32,
 }
 
 #[derive(Debug)]
 pub struct FontMetrics {
-    pub ascent: i16,
-    pub descent: i16,
-    pub units_per_em: u16,
-    pub scale: f64,
-    pub ascender_scaled: f64,
-    pub descender_scaled: f64,
-    // pub x_height: f64,
-    // pub capHeight: f64,
-    // pub line_gap: f64
+    pub ascent: f32,
+    pub descent: f32,
+    pub scale: f32,
+    pub ascender_scaled: f32,
+    pub descender_scaled: f32,
+    pub line_gap: f32,
 }
 
 #[derive(Debug)]
@@ -32,8 +31,14 @@ pub struct Font<'s> {
     units_per_em: u16,
     glyph_metrics: HashMap<u16, GlyphMetrics>,
     glyph_ids: HashMap<u16, char>,
+    metrics: FontMetrics
 }
 
+impl Default for FontMetrics {
+    fn default() -> Self {
+        FontMetrics { ascent: 0.0, descent: 0.0, scale: 0.0, ascender_scaled: 0.0, descender_scaled: 0.0, line_gap: 0.0 }
+    }
+}
 
 
 
@@ -51,24 +56,25 @@ impl<'s> Font<'s> {
                 units_per_em,
                 glyph_metrics: HashMap::new(),
                 glyph_ids: HashMap::new(),
-
+                metrics: FontMetrics::default(),
             };
         font.get_glyphs_data();
+        font.metrics = font.font_metrics();
         font
 
         }
     fn face(&self) -> &Face<'_> {
         self.face.as_face_ref()
     }
-    pub fn font_metrics(&self) -> FontMetrics {
-        let scale =  1000.0 / (self.face().units_per_em() as f64);
+    fn font_metrics(&self) -> FontMetrics {
+        let scale =  1000.0 / (self.face().units_per_em() as f32);
         FontMetrics { 
-            ascent: self.face().ascender(), 
-            descent: self.face().descender(), 
-            units_per_em: self.face().units_per_em(),
+            ascent: self.face().ascender() as f32, 
+            descent: self.face().descender()as f32, 
             scale,
-            ascender_scaled: (self.face().ascender() as f64) * scale, 
-            descender_scaled: (self.face().descender() as f64) * scale, 
+            ascender_scaled: (self.face().ascender() as f32) * scale, 
+            descender_scaled: (self.face().descender() as f32) * scale, 
+            line_gap: (self.face().line_gap()  as f32) * scale
         }
             
     }
@@ -78,6 +84,17 @@ impl<'s> Font<'s> {
             .glyph_index(c)
             .map(|id| id.0)
     }
+
+    fn get_id_by_char(&self, c: char) -> Option<owned_ttf_parser::GlyphId> {
+        if let Some(id) = self.glyph_id_for_char(c) {
+            Some(owned_ttf_parser::GlyphId(id))
+        } else {
+            None
+        }
+    } 
+    fn get_id(&self, id: u16) -> owned_ttf_parser::GlyphId {
+        owned_ttf_parser::GlyphId(id)
+    } 
 
     pub fn glyph_metrics_for_char(&self, c: char) -> Option<&GlyphMetrics> {
         if let Some(id) = self.glyph_id_for_char(c) {
@@ -123,67 +140,66 @@ impl<'s> Font<'s> {
     fn get_glyph_metrics(&self, glyph_id_in: u16, ch: char) -> Option<GlyphMetrics> {
         let glyph_id = owned_ttf_parser::GlyphId(glyph_id_in);
         if let Some(width) = self.face().glyph_hor_advance(glyph_id) {
-            let width = width as u32;
+            let width = width as f32;
             let height = self.face().glyph_bounding_box(glyph_id).map(|bbox| {
                 bbox.y_max - bbox.y_min - self.face().descender()
-            }).unwrap_or(1000) as u32;
+            }).unwrap_or(1000) as f32;
             Some(GlyphMetrics::new(glyph_id_in, width, height, ch))
         } else {
             None
         }
     }
-
-    //fn get_kerning_for_char(&self, left: char, right: char) {}
     
-    fn get_kerning_for_glyph_ids(&self, left: u16, right: u16)  {
-        //what about GPOS
-        let left = owned_ttf_parser::GlyphId(left);
-        let right = owned_ttf_parser::GlyphId(right);
-        //TODO ERRORS and OPTIONS
-        let kern_tables = self.face().tables().kern.unwrap().subtables.into_iter();       
-        for (i, k)in kern_tables.enumerate() {
-            println!("{:?}", i);
+
+
+
+
+    fn get_text_width(&self, text: &str, font_size: f32) -> f32 {
+        0.0
+    }
+
+    fn get_kern_table(&self) -> Option<Subtable> {
+        if let Some(kern) = self.face().tables().kern {
+            kern.subtables.into_iter().next()
+        } else {
+            None
         }
     }
 
-
-    fn get_text_width(&self, text: &str, font_size: f64) -> f64 {
-        let run =        
-
-        
-
-
-        0.0
-           
-    }
-
-    fn get_run(&self, text: &str) ->  {
-        text.chars().map(|c| {self.glyph_metrics_for_char(c)});
+    fn get_run(&self, text: &str) -> Result<Vec<GlyphMetrics>, Error> {
+        let mut previous = -1;
+        let kern_table = self.get_kern_table();
+        let mut metrics = Vec::new();
+        for c in text.chars() { 
+            let current = self.glyph_id_for_char(c).unwrap();
+            let mut glyph = match self.glyph_metrics_for_char(c) {
+                Some(g) => g.clone(),
+                None => panic!()
+            };
+            if previous == -1 {
+                previous = current as i32;
+                metrics.push(glyph);
+            } else {
+                if let Some(kerning) = kern_table.clone() {
+                    glyph.kern_right = kerning.glyphs_kerning(self.get_id(previous as u16), self.get_id(current)).unwrap_or(0) as f32;
+                }
+                metrics.push(glyph)
+            }
+        }
+        Ok(metrics)
     }
 }
 
 
 
 impl GlyphMetrics {
-    pub fn new(id: u16, width: u32, height: u32, character: char) -> Self {
+    pub fn new(id: u16, width: f32, height: f32, character: char) -> Self {
         Self {
-            id, width, height, character
+            id, width, height, character, kern_right: 0.0
         }
     }
-
-    pub fn id(&self) -> u16 {
-        self.id
-    }
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-    pub fn character(&self) -> char {
-        self.character
-    }
 }
+
 
 
 
@@ -191,45 +207,65 @@ impl GlyphMetrics {
 mod test {
 
     use super::*;
-    const SRC: &str = "/usr/share/fonts/nerd-fonts-complete/TTF/Noto Sans Regular Nerd Font Complete.ttf";
-    const NAME: &str = "noto";
-
+    const NOTO: &str = "/usr/share/fonts/nerd-fonts-complete/TTF/Noto Sans Regular Nerd Font Complete.ttf";
+    const CAL: &str = "Calibri Regular.ttf";
     #[test]
     fn init_font() {
-        let f = Font::new_from_file(SRC, NAME);
+        let f = Font::new_from_file(NOTO, "noto");
         assert_eq!(f.name, "noto");
         assert_eq!(f.units_per_em, 1000);
-        assert_eq!(f.font_metrics().ascent, 1069);
-        assert_eq!(f.font_metrics().descent, -293);
+        assert_eq!(f.font_metrics().ascent, 1069.0);
+        assert_eq!(f.font_metrics().descent, -293.0);
 
     }
 
     #[test]
     fn get_glypth_id() {
-        let f = Font::new_from_file(SRC, NAME);
+        let f = Font::new_from_file(NOTO, "noto");
         assert_eq!(f.glyph_id_for_char('a'), Some(70));
 
     }
 
     #[test]
     fn get_glyph_metrics() {
-
         // Values can very by 1, because owned_ttf_parser/ttf_parser don't round 
         // but rather offset [because of no-std]
-        let f = Font::new_from_file(SRC, NAME);
+        let f = Font::new_from_file(NOTO, "noto");
         let glyph_metrics = f.glyph_metrics_for_char('a');
         let height = 545 - (-10 as i32) - (-293 as i32);
-        let advanced_width: u32 = 561;
+        let advanced_width: f32 = 561.0;
         let id = 70;
-        assert_eq!(glyph_metrics.unwrap().id(), id);
-        assert_eq!(glyph_metrics.unwrap().height(), height as u32);
-        assert_eq!(glyph_metrics.unwrap().width(), advanced_width);
+        assert_eq!(glyph_metrics.unwrap().id, id);
+        assert_eq!(glyph_metrics.unwrap().height, height as f32);
+        assert_eq!(glyph_metrics.unwrap().width, advanced_width);
         assert_eq!(glyph_metrics.unwrap().character, 'a');
     }
 
     #[test]
-    fn get_kerning() {
-        let f = Font::new_from_file("/home/pd/projects/fontw/Calibri Regular.ttf", "Calibri");
-        f.get_kerning_for_glyph_ids(70, 71);
+    fn get_glyph_run() {
+        let f = Font::new_from_file(CAL, "Calibri");
+        let text = "AB";
+        let expected = vec![GlyphMetrics { id: 4, character: 'A', width: 1185.0, height: 1818.0, kern_right: 0.0 }, GlyphMetrics { id: 17, character: 'B', width: 1114.0, height: 1806.0, kern_right: 0.0 }];
+        let run = f.get_run(text).unwrap();
+        assert_eq!(run, expected);
+    }
+
+
+
+
+    #[test]
+    fn get_kern_table() {
+        let f = Font::new_from_file(CAL, "Calibri");
+       let kerning = f.get_kern_table();
+       assert!(kerning.is_some());
     }
 }
+
+
+
+
+
+
+
+
+
