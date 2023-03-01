@@ -2,17 +2,11 @@ use std::ops::Deref;
 use std::{path::Path, fmt::Error};
 use std::collections::HashMap;
 use std::fs;
+use crate::glyphs::GlyphMetrics;
+use crate::layout_run::LayoutRun;
 
 use owned_ttf_parser::{OwnedFace, Face, AsFaceRef, kern::{self, Subtable}};
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct GlyphMetrics {
-   pub id: u16,
-   pub character: char,
-   pub width: f32,
-   pub height: f32,
-   pub kern_right: f32,
-}
 
 #[derive(Debug)]
 pub struct FontMetrics {
@@ -26,22 +20,14 @@ pub struct FontMetrics {
 
 #[derive(Debug)]
 pub struct Font<'s> {
-    name: &'s str,
+    pub name: &'s str,
     face: OwnedFace,
-    units_per_em: u16,
-    glyph_metrics: HashMap<u16, GlyphMetrics>,
+    pub units_per_em: u16,
+    pub glyph_metrics: HashMap<u16, GlyphMetrics>,
     glyph_ids: HashMap<u16, char>,
-    metrics: FontMetrics
+    pub metrics: FontMetrics
 }
 
-pub struct LayoutRun<'t> {
-    text: &'t str,
-    font: &'t str,
-    font_size: f32,
-    glyph_run: Vec<GlyphMetrics>,
-    line_height: f32,
-    line_gap: f32,
-}
 
 impl Default for FontMetrics {
     fn default() -> Self {
@@ -167,39 +153,37 @@ impl<'s> Font<'s> {
         (asc + gap - dsc) / 1000.0
     }
 
-    fn line_height(&self, font_size: f32) -> f32 {
+    pub fn line_height(&self, font_size: f32) -> f32 {
         let lh = self.calc_line_height();
         lh * font_size
     }
 
+    pub fn line_gap(&self, font_size: f32) -> f32 {
+        (self.metrics.line_gap / 1000.0) * font_size
+    }
 
-    fn layout_run(&self, text: &str, font_size: f32) -> Result<f32, Error> {
+
+    pub fn layout_run(&self, text: &str, font_size: f32) -> Result<LayoutRun, Error> {
         let mut glyph_run = match self.run(text) {
             Ok(r) => r,
             Err(_) => panic!()
         };
 
-        
-
-
-
-
-
-        let layout = LayoutRun {
-            font: self.name,
-            text,
+        for glyph in glyph_run.iter_mut() {
+            glyph.apply_kerning();
+            glyph.apply_scale(self.metrics.scale);
+            glyph.width *= font_size/1000.0;
+        }
+        Ok(LayoutRun {
+            font: self.name.to_string(),
+            text: text.to_string(),
             glyph_run,
             font_size,
-            line_height: 0.0,
-            line_gap: 0.0
-        };
-
-
-
-
-
-        Ok(0.0)
+            line_height: self.line_height(font_size),
+            line_gap: self.line_gap(font_size),
+        })
     }
+
 
     fn retrieve_kern_table(&self) -> Option<Subtable> {
         if let Some(kern) = self.face().tables().kern {
@@ -221,30 +205,17 @@ impl<'s> Font<'s> {
             };
             if previous == -1 {
                 previous = current as i32;
-                metrics.push(glyph);
+                metrics.push(glyph.clone());
             } else {
                 if let Some(kerning) = kern_table.clone() {
                     glyph.kern_right = kerning.glyphs_kerning(self.glyph_id(previous as u16), self.glyph_id(current)).unwrap_or(0) as f32;
                 }
-                metrics.push(glyph)
+                metrics.push(glyph.clone())
             }
         }
         Ok(metrics)
     }
 }
-
-
-
-impl GlyphMetrics {
-    pub fn new(id: u16, width: f32, height: f32, character: char) -> Self {
-        Self {
-            id, width, height, character, kern_right: 0.0
-        }
-    }
-}
-
-
-
 
 #[cfg(test)]
 mod test {
@@ -305,20 +276,46 @@ mod test {
         let f = Font::new_from_file(CAL, "Calibri");
         assert!(cmp_f32(f.calc_line_height(), 1.220703f32));
         assert!(cmp_f32(f.line_height(16.0), 19.53125f32));
+        assert!(cmp_f32(f.line_gap(16.0), 3.53125f32));
     }
-
-
-
-
-
-
 
 
     #[test]
     fn get_kern_table() {
-        let f = Font::new_from_file(CAL, "Calibri");
+       let f = Font::new_from_file(CAL, "Calibri");
        let kerning = f.retrieve_kern_table();
        assert!(kerning.is_some());
+    }
+
+    #[test]
+    fn get_layout_run() {
+        let f = Font::new_from_file(CAL, "Calibri");
+        let text = "AB";
+        let expected = LayoutRun { 
+            text: "AB".to_string(), 
+            font: "Calibri".to_string(), 
+            font_size: 12.0, 
+            glyph_run: vec![
+                GlyphMetrics { 
+                    id: 4, 
+                    character: 'A', 
+                    width: 6.9433594, 
+                    height: 1818.0, 
+                    kern_right: 0.0 
+                }, 
+                GlyphMetrics { 
+                    id: 17, 
+                    character: 'B',
+                    width: 6.5273438, 
+                    height: 1806.0, 
+                    kern_right: 0.0 
+                }
+            ], 
+            line_height: 14.6484375, 
+            line_gap: 2.6484375 
+        };
+        assert_eq!(f.layout_run(text, 12.0), Ok(expected));
+
     }
 }
 
