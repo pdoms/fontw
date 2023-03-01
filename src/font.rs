@@ -34,6 +34,15 @@ pub struct Font<'s> {
     metrics: FontMetrics
 }
 
+pub struct LayoutRun<'t> {
+    text: &'t str,
+    font: &'t str,
+    font_size: f32,
+    glyph_run: Vec<GlyphMetrics>,
+    line_height: f32,
+    line_gap: f32,
+}
+
 impl Default for FontMetrics {
     fn default() -> Self {
         FontMetrics { ascent: 0.0, descent: 0.0, scale: 0.0, ascender_scaled: 0.0, descender_scaled: 0.0, line_gap: 0.0 }
@@ -58,7 +67,7 @@ impl<'s> Font<'s> {
                 glyph_ids: HashMap::new(),
                 metrics: FontMetrics::default(),
             };
-        font.get_glyphs_data();
+        font.calc_glyphs_data();
         font.metrics = font.font_metrics();
         font
 
@@ -66,7 +75,7 @@ impl<'s> Font<'s> {
     fn face(&self) -> &Face<'_> {
         self.face.as_face_ref()
     }
-    fn font_metrics(&self) -> FontMetrics {
+    pub fn font_metrics(&self) -> FontMetrics {
         let scale =  1000.0 / (self.face().units_per_em() as f32);
         FontMetrics { 
             ascent: self.face().ascender() as f32, 
@@ -85,14 +94,14 @@ impl<'s> Font<'s> {
             .map(|id| id.0)
     }
 
-    fn get_id_by_char(&self, c: char) -> Option<owned_ttf_parser::GlyphId> {
+    fn id_by_char(&self, c: char) -> Option<owned_ttf_parser::GlyphId> {
         if let Some(id) = self.glyph_id_for_char(c) {
             Some(owned_ttf_parser::GlyphId(id))
         } else {
             None
         }
     } 
-    fn get_id(&self, id: u16) -> owned_ttf_parser::GlyphId {
+    fn glyph_id(&self, id: u16) -> owned_ttf_parser::GlyphId {
         owned_ttf_parser::GlyphId(id)
     } 
 
@@ -108,7 +117,7 @@ impl<'s> Font<'s> {
         }
     }
 
-    fn get_glyphs_data(&mut self) {
+    fn calc_glyphs_data(&mut self) {
         let subtables = self.face()
             .tables()
             .cmap
@@ -126,7 +135,7 @@ impl<'s> Font<'s> {
                 if let Ok(ch) = char::try_from(c) {
                     if let Some(idx) = sub.glyph_index(c).filter(|idx| idx.0 > 0) {
                         ids.entry(idx.0).or_insert(ch);
-                        if let Some(met) = self.get_glyph_metrics(idx.0, ch){
+                        if let Some(met) = self.calc_glyph_metrics(idx.0, ch){
                             mertrics.entry(idx.0).or_insert(met);
                         };
                     }
@@ -137,7 +146,7 @@ impl<'s> Font<'s> {
         self.glyph_metrics = mertrics;
     }
 
-    fn get_glyph_metrics(&self, glyph_id_in: u16, ch: char) -> Option<GlyphMetrics> {
+    fn calc_glyph_metrics(&self, glyph_id_in: u16, ch: char) -> Option<GlyphMetrics> {
         let glyph_id = owned_ttf_parser::GlyphId(glyph_id_in);
         if let Some(width) = self.face().glyph_hor_advance(glyph_id) {
             let width = width as f32;
@@ -151,14 +160,48 @@ impl<'s> Font<'s> {
     }
     
 
-
-
-
-    fn get_text_width(&self, text: &str, font_size: f32) -> f32 {
-        0.0
+    fn calc_line_height(&self) -> f32 {
+        let gap = self.metrics.line_gap;
+        let asc = self.metrics.ascender_scaled;
+        let dsc = self.metrics.descender_scaled;
+        (asc + gap - dsc) / 1000.0
     }
 
-    fn get_kern_table(&self) -> Option<Subtable> {
+    fn line_height(&self, font_size: f32) -> f32 {
+        let lh = self.calc_line_height();
+        lh * font_size
+    }
+
+
+    fn layout_run(&self, text: &str, font_size: f32) -> Result<f32, Error> {
+        let mut glyph_run = match self.run(text) {
+            Ok(r) => r,
+            Err(_) => panic!()
+        };
+
+        
+
+
+
+
+
+        let layout = LayoutRun {
+            font: self.name,
+            text,
+            glyph_run,
+            font_size,
+            line_height: 0.0,
+            line_gap: 0.0
+        };
+
+
+
+
+
+        Ok(0.0)
+    }
+
+    fn retrieve_kern_table(&self) -> Option<Subtable> {
         if let Some(kern) = self.face().tables().kern {
             kern.subtables.into_iter().next()
         } else {
@@ -166,9 +209,9 @@ impl<'s> Font<'s> {
         }
     }
 
-    fn get_run(&self, text: &str) -> Result<Vec<GlyphMetrics>, Error> {
+    fn run(&self, text: &str) -> Result<Vec<GlyphMetrics>, Error> {
         let mut previous = -1;
-        let kern_table = self.get_kern_table();
+        let kern_table = self.retrieve_kern_table();
         let mut metrics = Vec::new();
         for c in text.chars() { 
             let current = self.glyph_id_for_char(c).unwrap();
@@ -181,7 +224,7 @@ impl<'s> Font<'s> {
                 metrics.push(glyph);
             } else {
                 if let Some(kerning) = kern_table.clone() {
-                    glyph.kern_right = kerning.glyphs_kerning(self.get_id(previous as u16), self.get_id(current)).unwrap_or(0) as f32;
+                    glyph.kern_right = kerning.glyphs_kerning(self.glyph_id(previous as u16), self.glyph_id(current)).unwrap_or(0) as f32;
                 }
                 metrics.push(glyph)
             }
@@ -207,6 +250,11 @@ impl GlyphMetrics {
 mod test {
 
     use super::*;
+
+    fn cmp_f32(this: f32, that: f32) -> bool {
+        (this - that).abs() < 0.1f32  
+    }
+
     const NOTO: &str = "/usr/share/fonts/nerd-fonts-complete/TTF/Noto Sans Regular Nerd Font Complete.ttf";
     const CAL: &str = "Calibri Regular.ttf";
     #[test]
@@ -241,14 +289,27 @@ mod test {
         assert_eq!(glyph_metrics.unwrap().character, 'a');
     }
 
+
+
     #[test]
     fn get_glyph_run() {
         let f = Font::new_from_file(CAL, "Calibri");
         let text = "AB";
         let expected = vec![GlyphMetrics { id: 4, character: 'A', width: 1185.0, height: 1818.0, kern_right: 0.0 }, GlyphMetrics { id: 17, character: 'B', width: 1114.0, height: 1806.0, kern_right: 0.0 }];
-        let run = f.get_run(text).unwrap();
+        let run = f.run(text).unwrap();
         assert_eq!(run, expected);
     }
+
+    #[test]
+    fn test_line_height() {
+        let f = Font::new_from_file(CAL, "Calibri");
+        assert!(cmp_f32(f.calc_line_height(), 1.220703f32));
+        assert!(cmp_f32(f.line_height(16.0), 19.53125f32));
+    }
+
+
+
+
 
 
 
@@ -256,7 +317,7 @@ mod test {
     #[test]
     fn get_kern_table() {
         let f = Font::new_from_file(CAL, "Calibri");
-       let kerning = f.get_kern_table();
+       let kerning = f.retrieve_kern_table();
        assert!(kerning.is_some());
     }
 }
