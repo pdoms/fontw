@@ -33,16 +33,13 @@ impl LayoutRun {
 #[cfg(test)]
 mod test {
 
-    use super::*;
     use crate::font::Font;
 
     fn cmp_f32(this: f32, that: f32) -> bool {
         (this - that).abs() < 0.1f32  
     }
 
-    
-
-    const CAL: &str = "Calibri Regular.ttf";
+    const CAL: &str = "assets/Calibri Regular.ttf";
     #[test]
     fn test_run_width() {
         let f = Font::new_from_file(CAL, "Calibri");

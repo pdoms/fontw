@@ -403,8 +403,8 @@ mod test {
         (this - that).abs() < 0.1f32  
     }
 
-    const NOTO: &str = "/usr/share/fonts/nerd-fonts-complete/TTF/Noto Sans Regular Nerd Font Complete.ttf";
-    const CAL: &str = "Calibri Regular.ttf";
+    const NOTO: &str = "assets/NotoSansRegularNerdFontComplete.ttf";
+    const CAL: &str = "assets/Calibri Regular.ttf";
     #[test]
     fn init_font() {
         let f = Font::new_from_file(NOTO, "noto");
