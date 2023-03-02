@@ -1,17 +1,17 @@
-use std::ops::Deref;
-use std::{path::Path, fmt::Error};
-use std::collections::HashMap;
-use std::fs;
+use std::{path::Path, fmt::Error, collections::HashMap};
+
+use std::{fs, vec};
 use crate::glyphs::GlyphMetrics;
 use crate::layout_run::LayoutRun;
 
 use owned_ttf_parser::{OwnedFace, Face, AsFaceRef, kern::{self, Subtable}};
+use lopdf::{self, StringFormat};
 
 
 #[derive(Debug)]
 pub struct FontMetrics {
-    pub ascent: f32,
-    pub descent: f32,
+    pub ascent: i64,
+    pub descent: i64,
     pub scale: f32,
     pub ascender_scaled: f32,
     pub descender_scaled: f32,
@@ -22,6 +22,7 @@ pub struct FontMetrics {
 pub struct Font<'s> {
     pub name: &'s str,
     face: OwnedFace,
+    raw_bytes: Vec<u8>,
     pub units_per_em: u16,
     pub glyph_metrics: HashMap<u16, GlyphMetrics>,
     glyph_ids: HashMap<u16, char>,
@@ -31,7 +32,7 @@ pub struct Font<'s> {
 
 impl Default for FontMetrics {
     fn default() -> Self {
-        FontMetrics { ascent: 0.0, descent: 0.0, scale: 0.0, ascender_scaled: 0.0, descender_scaled: 0.0, line_gap: 0.0 }
+        FontMetrics { ascent: 0, descent: 0, scale: 0.0, ascender_scaled: 0.0, descender_scaled: 0.0, line_gap: 0.0 }
     }
 }
 
@@ -43,29 +44,30 @@ impl<'s> Font<'s> {
         let p = Path::new(src);
         //TODO: handle error at new_from_file
         let raw = fs::read(p).unwrap();
-        let face = OwnedFace::from_vec(raw, 0).unwrap();
+        let face = OwnedFace::from_vec(raw.clone(), 0).unwrap();
         let units_per_em = face.as_face_ref().units_per_em();
         let mut font = Self {
                 name,
+                raw_bytes: raw,
                 face,
                 units_per_em,
                 glyph_metrics: HashMap::new(),
                 glyph_ids: HashMap::new(),
                 metrics: FontMetrics::default(),
-            };
+        };
         font.calc_glyphs_data();
         font.metrics = font.font_metrics();
         font
-
-        }
+    }
     fn face(&self) -> &Face<'_> {
         self.face.as_face_ref()
+
     }
     pub fn font_metrics(&self) -> FontMetrics {
         let scale =  1000.0 / (self.face().units_per_em() as f32);
         FontMetrics { 
-            ascent: self.face().ascender() as f32, 
-            descent: self.face().descender()as f32, 
+            ascent: self.face().ascender() as i64, 
+            descent: self.face().descender()as i64, 
             scale,
             ascender_scaled: (self.face().ascender() as f32) * scale, 
             descender_scaled: (self.face().descender() as f32) * scale, 
@@ -215,14 +217,189 @@ impl<'s> Font<'s> {
         }
         Ok(metrics)
     }
+    // almost directly taken from printpdf - except that we memcopy, font data
+    pub fn embed_lopdf(&self, doc: &mut lopdf::Document, index: usize) -> lopdf::Dictionary 
+        {
+        use lopdf::Object;
+        use lopdf::Object::*;
+
+        let face_name = format!("F{}", index);
+
+        let face_metrics = self.font_metrics();
+
+        let bytes_len = self.raw_bytes.len();
+        let mut buf = vec![0u8; bytes_len];
+        buf.copy_from_slice(&self.raw_bytes);
+
+        let font_stream = lopdf::Stream::new(
+            lopdf::Dictionary::from_iter(vec![
+                ("Length1", Integer(bytes_len as i64)),
+            ]),
+            buf, 
+        ).with_compression(false);
+
+        let mut font_vec: Vec<(::std::string::String, Object)> = vec![
+            ("Type".into(), Name("Font".into())),
+            ("Subtype".into(), Name("Type0".into())),
+            ("BaseFont".into(), Name(face_name.clone().into_bytes())),
+            ("Encodign".into(), Name("Identity-H".into())),
+        ];
+
+        let mut font_descriptor_vec: Vec<(::std::string::String, Object)> = vec![
+            ("Type".into(),        Name("FontDescriptor".into())),
+            ("fontName".into(),    Name(face_name.clone().into_bytes())),
+            ("Ascent".into(),      Integer(face_metrics.ascent)),
+            ("Descent".into(),     Integer(face_metrics.descent)),
+            ("CapHeight".into(),   Integer(face_metrics.ascent)),
+            ("ItalicAngle".into(), Integer(0)),
+            ("Flags".into(),       Integer(32)),
+            ("StemV".into(),       Integer(80)),
+        ];
+
+        let mut max_height = 0.0;
+        let mut total_width = 0.0;
+        let mut widths = Vec::<(u32, u32)>::new();
+        let mut cmap = std::collections::BTreeMap::<u32, (u32, u32, u32)>::new();
+        cmap.insert(0, (0, 1000, 1000));
+
+        for (glyph_id, c) in self.glyph_ids.clone() {
+            if let Some(metrics) = self.glyph_metrics_for_char(c) {
+
+                if metrics.height > max_height {
+                    max_height = metrics.height;
+                }
+                total_width += metrics.width;
+                cmap.insert(glyph_id as u32, (c as u32, metrics.width as u32, metrics.height as u32));
+            }
+        }
+
+        let mut cur_first_bit = 0_u16;
+
+        let mut all_cmap_blocks = Vec::new(); 
+
+        {
+            let mut current_cmap_block = Vec::new();
+            for (glyph_id, unicode_width_tuple) in &cmap {
+                if (*glyph_id >> 8) as u16 != cur_first_bit || current_cmap_block.len() >= 100 {
+                    all_cmap_blocks.push(current_cmap_block.clone());
+                        current_cmap_block = Vec::new();
+                        cur_first_bit = (*glyph_id >> 8) as u16;
+                }
+
+                let (unicode, width, _) = *unicode_width_tuple;
+                current_cmap_block.push((*glyph_id, unicode));
+                widths.push((*glyph_id, width));
+            };
+            
+            all_cmap_blocks.push(current_cmap_block);
+        }
+
+        let cid_to_unicode_map =  generate_cid_to_unicode_map(face_name.clone(), all_cmap_blocks);
+        
+        let cid_to_unicode_map_stream = lopdf::Stream::new(lopdf::Dictionary::new(), cid_to_unicode_map.as_bytes().to_vec());
+        let cid_to_unicode_map_stream_id = doc.add_object(cid_to_unicode_map_stream);
+
+
+
+        let mut widths_list = Vec::<Object>::new();
+        let mut current_low_gid = 0;
+        let mut current_high_gid = 0;
+        let mut current_width_vec = Vec::<Object>::new();
+
+        let percentage_font_scaling = face_metrics.scale as f64;
+
+        for (gid, width) in widths {
+            if gid == current_high_gid {
+                current_width_vec.push(Integer((width as f64 * percentage_font_scaling) as i64));
+                current_high_gid += 1;
+            } else {
+                widths_list.push(Integer(current_low_gid as i64));
+                widths_list.push(Array(current_width_vec.drain(..).collect()));
+                
+                current_width_vec.push(Integer((width as f64 * percentage_font_scaling) as i64));
+                current_low_gid = gid;
+                current_high_gid = gid + 1;
+            }
+        }
+        widths_list.push(Integer(current_low_gid as i64));
+        widths_list.push(Array(current_width_vec.drain(..).collect()));
+        
+        let w = ("W", Array(widths_list));
+        let dw = ("DW", Integer(1000));
+
+        let mut desc_fonts = lopdf::Dictionary::from_iter(vec![
+            ("Type", Name("Font".into())),
+            ("Subtype", Name("CIDFontType2".into())),
+            ("BaseFont", Name(face_name.clone().into())),
+            ("CIDSystemInfo", Dictionary(lopdf::Dictionary::from_iter(vec![
+                ("Registry", String("Adobe".into(), StringFormat::Literal)),
+                ("Ordering", String("Identity".into(), StringFormat::Literal)),
+                ("Supplement", Integer(0))
+
+            ]))),
+            w, 
+            dw
+        ]);
+ 
+        let font_bbox = vec![Integer(0), Integer(max_height as i64), Integer(total_width as i64), Integer(max_height as i64)];
+        font_descriptor_vec.push(("FontFile2".into(), Reference(doc.add_object(font_stream))));
+        font_descriptor_vec.push(("FontBBox".into(), Array(font_bbox)));
+
+        let font_descriptor_vec_id = doc.add_object(lopdf::Dictionary::from_iter(font_descriptor_vec));
+        desc_fonts.set("FontDescriptor", Reference(font_descriptor_vec_id));
+
+        font_vec.push(("DescendantFonts".into(), Array(vec![Dictionary(desc_fonts)])));
+        font_vec.push(("ToUnicode".into(), Reference(cid_to_unicode_map_stream_id)));
+
+        lopdf::Dictionary::from_iter(font_vec)
+
+
+
+    }
+
+
+
+
+
 }
+
+type GlyphId = u32;
+type UnicodeCodePoint = u32;
+type CmapBlock = Vec<(GlyphId, UnicodeCodePoint)>;
+
+fn generate_cid_to_unicode_map(face_name: String, all_cmap_blocks: Vec<CmapBlock>) -> String {
+    let mut cid_to_unicode_map = format!(include_str!("../assets/gid_to_unicode_beg.txt"), face_name);
+    
+    for cmap_block in all_cmap_blocks.into_iter().filter(|block| !block.is_empty() || block.len() < 100) {
+        cid_to_unicode_map.push_str(format!("{} beginbfchar\r\n", cmap_block.len()).as_str());
+        for (glyph_id, unicode) in cmap_block {
+            cid_to_unicode_map.push_str(format!("<{:04x}> <{:04x}>\n", glyph_id, unicode).as_str());
+        }
+
+        cid_to_unicode_map.push_str("endbfchar\r\n");
+    }
+    cid_to_unicode_map.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend");
+    cid_to_unicode_map
+}
+
+
+
+
+
+
+
+
+
+
+
 
 #[cfg(test)]
 mod test {
+    use lopdf::Document;
 
     use super::*;
 
-    fn cmp_f32(this: f32, that: f32) -> bool {
+   fn cmp_f32(this: f32, that: f32) -> bool {
         (this - that).abs() < 0.1f32  
     }
 
@@ -233,8 +410,8 @@ mod test {
         let f = Font::new_from_file(NOTO, "noto");
         assert_eq!(f.name, "noto");
         assert_eq!(f.units_per_em, 1000);
-        assert_eq!(f.font_metrics().ascent, 1069.0);
-        assert_eq!(f.font_metrics().descent, -293.0);
+        assert_eq!(f.font_metrics().ascent, 1069);
+        assert_eq!(f.font_metrics().descent, -293);
 
     }
 
@@ -315,7 +492,13 @@ mod test {
             line_gap: 2.6484375 
         };
         assert_eq!(f.layout_run(text, 12.0), Ok(expected));
+    }
 
+    #[test]
+    fn test_embedding() {
+        let f = Font::new_from_file(CAL, "Calibri");
+        let mut doc = Document::with_version("1.7");
+        f.embed_lopdf(&mut doc, 0);
     }
 }
 

@@ -11,6 +11,9 @@ pub struct LayoutRun {
     pub line_gap: f32,
 }
 
+pub struct WordRun {}
+pub struct LineRun {}
+
 
 impl LayoutRun {
     pub fn run_width(&self) -> f32 {
@@ -20,6 +23,8 @@ impl LayoutRun {
         } 
         acc
     }
+
+
 }
 
 

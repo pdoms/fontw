@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 owned_ttf_parser = "0.18.1"
+lopdf = "0.29.0"
+
